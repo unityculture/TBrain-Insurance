@@ -1,0 +1,305 @@
+---
+title: "TBrain Data Check"
+date : '`r Sys.Date()` Updated'
+author : "@BI Team"
+output:
+  rmdformats::readthedown:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+library(rmdformats)
+library(ggplot2)
+library(ggthemr)
+library(ggthemes)
+library(DT)
+library(tidyr)
+library(stringr)
+library(data.table)
+library(lubridate)
+library(magrittr)
+library(dplyr)
+library(bigrquery)
+library(kableExtra)
+library(highcharter)
+library(ggforce)
+library(randomForest)
+library(ROCR)
+library(RPostgreSQL)
+library(RJDBC)
+library(dbplyr)
+library(readr)
+opts_chunk$set(echo=TRUE,
+               cache=TRUE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE)
+options(scipen = 100)
+```
+
+```{r}
+col_type <- cols(
+  "Policy_Number"  = "c",
+  "Insured's_ID"  = "c",
+  "Prior_Policy_Number"  = "c",
+  "Cancellation"  = "c",
+  "Vehicle_identifier"  = "c",
+  "Vehicle_Make_and_Model1"  = "c",
+  "Vehicle_Make_and_Model2"  = "c",
+  "Manafactured_Year_and_Month"  = "c",
+  "Engine_Displacement_(Cubic_Centimeter)"  = "n",
+  "Imported_or_Domestic_Car"  = "c",
+  "Coding_of_Vehicle_Branding_&_Type"  = "c",
+  "qpt"  = "n",
+  "fpt"  = "c",
+  "Main_Insurance_Coverage_Group"  = "c",
+  "Insurance_Coverage"  = "c",
+  "Insured_Amount1"  = "n",
+  "Insured_Amount2"  = "n",
+  "Insured_Amount3"  = "n",
+  "Coverage_Deductible_if_applied"  = "c",
+  "Premium"  = "n",
+  "Replacement_cost_of_insured_vehicle"  = "n",
+  "Distribution_Channel"  = "n",
+  "Multiple_Products_with_TmNewa_(Yes_or_No?)" = "n",
+  "lia_class"  = "n",
+  "plia_acc"  = "n",
+  "pdmg_acc"  = "n",
+  "fassured"  = "c",
+  "ibirth"  = "c",
+  "fsex"  = "c",
+  "fmarriage"  = "c",
+  "aassured_zip"  = "c",
+  "iply_area"  = "c",
+  "dbirth"  = "c",
+  "fequipment1"  = "c",
+  "fequipment2"  = "c",
+  "fequipment3"  = "c",
+  "fequipment4"  = "c",
+  "fequipment5"  = "c",
+  "fequipment6"  = "c",
+  "fequipment9"  = "c",
+  "nequipment9"  = "c"
+  )
+```
+
+```{r}
+claim <- fread("data/claim_0702.csv") %>% rename_all(~ str_replace(.x, '\\?', '')) 
+policy <- read_csv('data/policy_0702.csv', col_types = col_type)
+train <- fread('data/training-set.csv')
+train <- train %>% as_tibble()
+test <- fread('data/testing-set.csv')
+test <- test %>% as_tibble()
+```
+
+# Some Findings
+
+Claim Number + Coverage No Duplication : 
+
+- 針對一個出險號碼，多數都是只有賠付，少部分同時會有追償
+    - 針對只有賠付的，少部分肇責比例是 0% 的，竟然同時會記錄賠付金額(不太確定是不是資料錯誤，邏輯上好像不合理)
+    - 針對只有賠付的，多數都有賠付金額，少部分沒有賠付金額
+    - 根據網路資源，前一年若有出險，下一年的保費會增加，因此我相信這個欄位會是個重要的特徵。
+
+Claim Number + Coverage Duplication : 
+    
+- 針對一個出險號碼，多數同時有賠付與追償，少部分只有賠付
+    - 只有賠付的狀況，我還沒有仔細查，但可能會將重複的部份看是做去重還是合在一起
+    - 根據網路資源，我認為追償對於下一年保費會不會增加、續約，比較小的關連性。
+    - 若行有餘力我們在來處理這個欄位
+
+# Checking Data
+
+## Is Policy Number unique to Claim Number ?
+
+```{r}
+claim %>% group_by(Claim_Number) %>% 
+  summarise(n_distinct = n_distinct(Policy_Number)) %>% 
+  summarise('duplication of Policy Number' = sum(n_distinct == 1))
+```
+
+
+## Is Claim Number Duplicated in `claim` dataset?
+
+Sure !
+
+```{r}
+claim %>% summarise(n = n(), n_dis_claim_number = n_distinct(Claim_Number))
+```
+
+## Is Claim Number + Coverage Duplicated in `claim` dataset?
+
+Yes. So the `Claim Number + Coverage` Could not be join key.
+
+```{r}
+claim %>% summarise(n = n(), n_dis = n_distinct(Claim_Number, Coverage))
+```
+
+## Following the above, duplicated in which column ?
+
+### No Duplication Understanding {.tabset}
+
+先嘗試找出在 Claim 中 `Claim Number + Coverage` **沒有** Duplication 的那些數據，觀察：
+
+```{r}
+sample <- claim %>% group_by(Claim_Number, Coverage) %>% tally %>% filter(n == 1)
+
+claim %>% 
+  inner_join(sample %>% select(Claim_Number, Coverage)) %>% 
+  select(Claim_Number, Coverage, Nature_of_the_claim, Paid_Loss_Amount, paid_Expenses_Amount, Salvage_or_Subrogation) %>% head
+```
+
+不難觀察出只有一筆的這些 Claim Number，大多代表還沒追償。
+
+```{r}
+claim %>% 
+  inner_join(sample %>% select(Claim_Number, Coverage)) %>% 
+  summarise(' # of (claim number+Coverage) that have no duplication' = n_distinct(Claim_Number, 
+                                                                                  Coverage),
+            ' # of rows Nature_of_the_claim = 2 ?' = sum(ifelse(Nature_of_the_claim == 2, 1, 0)),
+            ' # of rows Paid_Loss_Amount or paid_Expenses_Amount > 0 ?' = 
+              sum(ifelse((Paid_Loss_Amount+paid_Expenses_Amount) > 0, 1, 0)),
+            ' # of rows Paid_Loss_Amount and paid_Expenses_Amount = 0 ?' = 
+              sum(ifelse((Paid_Loss_Amount + paid_Expenses_Amount) == 0, 1, 0)),
+            ' # of rows Salvage_or_Subrogation > 0 ?' = sum(ifelse(Salvage_or_Subrogation > 0, 1, 0)),
+            ' # of rows At_Fault = 0 ?' = sum((At_Fault == 0), na.rm = T),
+            ' # of rows At_Fault = 0 and (Paid_Loss_Amount) > 0 ?' = 
+              sum((At_Fault == 0) & (Paid_Loss_Amount > 0), na.rm = T),
+            ' # of rows At_Fault < 100 ?' = sum(At_Fault < 100, na.rm = T),
+            ' # of rows At_Fault < 100 and (Paid_Loss_Amount or paid_Expenses_Amount) > 0 ?' = 
+              sum((At_Fault < 100) & (Paid_Loss_Amount+paid_Expenses_Amount > 0), na.rm = T),
+            ' # of rows At_Fault ≥ 100 ?' = sum(At_Fault >= 100, na.rm = T),
+            ' # of rows At_Fault ≥ 100 and (Paid_Loss_Amount or paid_Expenses_Amount) > 0 ?' = 
+              sum((At_Fault >= 100) & (Paid_Loss_Amount+paid_Expenses_Amount > 0), na.rm = T)) %>% 
+  gather('Q', 'value') %>% 
+  mutate(Percentage_Overall = value/50646) %>% 
+  datatable(extensions = 'Buttons', 
+            options = list(dom = 'Bfrtip', scrollX = TRUE,
+            buttons = c('copy', 'csv', 'excel')), 
+            filter = 'top', rownames = F) %>% 
+  formatPercentage(3, 2)
+```
+
+#### Nature_of_the_claim = 2 ?	
+
+但有兩筆是卻是追償，邏輯上想不合理。針對一個 Coverage 不應該只有記錄追償，而沒有記錄賠付才對，但還是將 Claim_Number 拉出來看一下數據：
+
+那兩筆就是這個，不論是賠付還是追償的欄位都是 0，**那幹嘛出現在 Claim Dataset 中？**
+
+```{r}
+claim %>% 
+  inner_join(sample %>% select(Claim_Number, Coverage)) %>% 
+  filter(Nature_of_the_claim == 2) %>% 
+  select(Claim_Number, Coverage, Nature_of_the_claim, Paid_Loss_Amount, paid_Expenses_Amount, Salvage_or_Subrogation) %>% head %>% 
+  datatable(extensions = 'Buttons', 
+            options = list(dom = 'Bfrtip', scrollX = TRUE,
+            buttons = c('copy', 'csv', 'excel')), 
+            filter = 'top', rownames = F)
+```
+
+#### Paid_Loss_Amount and paid_Expenses_Amount = 0
+
+在來是，`Claim_Number + Coverage` 若是沒有 Duplicated，理論上應該要是賠付的紀錄，但發現有些數據的 Paid_Loss_Amount or paid_Expenses_Amount 皆為 0，數量還不少(13697)。
+
+肉眼檢查後也查不出原因，因為情況也蠻多的，不建議直接排除掉。
+
+```{r}
+claim %>% 
+  inner_join(sample %>% select(Claim_Number, Coverage)) %>% 
+  filter((Paid_Loss_Amount+paid_Expenses_Amount) == 0) %>% 
+  head
+```
+
+檢查看看其中 `At_Fault` 的比例，發現各種狀況都有。不論肇責多少，都有沒有賠付的情形發生。是不是有可能警察判定肇責後，最終不一定需要保險公司出險賠付？
+
+```{r}
+claim %>% 
+  inner_join(sample %>% select(Claim_Number, Coverage)) %>% 
+  filter((Paid_Loss_Amount+paid_Expenses_Amount) == 0) %>% 
+  count(At_Fault) %>% 
+  mutate(Percentage = n/sum(n)) %>% 
+  datatable(extensions = 'Buttons', 
+            options = list(dom = 'Bfrtip', scrollX = TRUE,
+            buttons = c('copy', 'csv', 'excel')), 
+            filter = 'top', rownames = F) %>% 
+  formatPercentage(3, 2)
+```
+
+> 看到網路上的資源寫有業務員怕客戶買了保險用不到，反而有怨言，因而慫恿保戶可出險，換做車體美容或汽車保養。[連結](https://theme.udn.com/theme/story/6773/3180272)
+
+### Duplication Understanding
+
+```{r}
+sample <- claim %>% group_by(Claim_Number, Coverage) %>% tally %>% filter(n > 1)
+
+claim %>% 
+  inner_join(sample %>% select(Claim_Number, Coverage)) %>% 
+  group_by(Claim_Number, Coverage) %>% 
+  mutate(Nature_of_the_claim_check = n_distinct(Nature_of_the_claim),
+         rows = n()) %>% 
+  ungroup %>%
+  {
+    count(.,  Nature_of_the_claim_check) %>% 
+      spread(Nature_of_the_claim_check, n) %>% 
+      select('# of (claim number+Coverage) that Nature_of_the_claim only exist 1' = 1, 
+             '# of (claim number+Coverage) that Nature_of_the_claim exist (1,2)' = 2) -> tmp1
+    
+    summarise(.,
+              ' # of (claim number+Coverage)' = n_distinct(Claim_Number,Coverage),
+              ' # of (claim number+Coverage) that have duplication' = n_distinct(Claim_Number,Coverage),
+              ' # of rows Paid_Loss_Amount or paid_Expenses_Amount > 0 ?' =  
+                sum(ifelse((Paid_Loss_Amount+paid_Expenses_Amount) > 0, 1, 0)),
+              ' # of rows Salvage_or_Subrogation > 0 ?' = sum(ifelse(Salvage_or_Subrogation > 0, 1, 0))) -> tmp2
+    
+    bind_cols(tmp1, tmp2)
+  } %>% 
+  gather('Q', 'value') %>% 
+  mutate(Percentage_Overall = value/12745)%>% 
+  datatable(extensions = 'Buttons', 
+            options = list(dom = 'Bfrtip', scrollX = TRUE,
+            buttons = c('copy', 'csv', 'excel')), 
+            filter = 'top', rownames = F) %>% 
+  formatPercentage(3, 2)
+```
+
+以 `Claim_Number = '5bf37c3c404bbb1d6d1b6818221f08be667ea00f'` 在下去查：
+
+險種代碼 = `04M` 的那些數據共有三筆，前兩筆是賠付，但僅差在賠付金額、自負額不一樣，覺得這個也不合邏輯，同樣的險種為什麼會賠付不同的金額，還有不同的自負額？
+
+而最後兩筆就是上一張表看到的狀況。
+
+> **延伸思考：剛開始險覺得好像是不合理的狀況，打算建議 Cleansing 掉，但會不會這會是個續不續約的重要訊息？如：應該賠付的卻無追償到任何金額？**
+
+```{r}
+claim %>% filter(Claim_Number == '5bf37c3c404bbb1d6d1b6818221f08be667ea00f') %>% 
+  datatable(extensions = 'Buttons', 
+            options = list(dom = 'Bfrtip', scrollX = TRUE,
+            buttons = c('copy', 'csv', 'excel')), 
+            filter = 'top', rownames = F)
+```
+
+
+## Reference
+
+> 這邊記錄一些零星的 check
+
+每一筆 Claim Number 只會對應到一筆 Policy Number
+
+```{r}
+claim %>% 
+  group_by(Claim_Number) %>% 
+  summarise(n_distinct = n_distinct(Policy_Number)) %>% 
+  filter(n_distinct == 2)
+```
+
+
+```{r}
+claim %>% 
+  inner_join(sample %>% select(Claim_Number, Coverage)) %>% 
+  count(At_Fault)
+
+```
+
