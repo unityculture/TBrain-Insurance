@@ -1,0 +1,160 @@
+---
+title: "TBrain- Policy & Claim Join"
+date : '`r Sys.Date()` Updated'
+author : "@BI Team"
+output:
+  rmdformats::readthedown:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+library(rmdformats)
+library(ggplot2)
+library(ggthemr)
+library(ggthemes)
+library(DT)
+library(tidyr)
+library(stringr)
+library(data.table)
+library(lubridate)
+library(magrittr)
+library(dplyr)
+library(bigrquery)
+library(kableExtra)
+library(highcharter)
+library(ggforce)
+library(randomForest)
+library(ROCR)
+library(RPostgreSQL)
+library(RJDBC)
+library(dbplyr)
+library(readr)
+opts_chunk$set(echo=TRUE,
+               cache=TRUE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE)
+options(scipen = 100)
+```
+
+```{r}
+col_type <- cols(
+  "Policy_Number"  = "c",
+  "Insured's_ID"  = "c",
+  "Prior_Policy_Number"  = "c",
+  "Cancellation"  = "c",
+  "Vehicle_identifier"  = "c",
+  "Vehicle_Make_and_Model1"  = "c",
+  "Vehicle_Make_and_Model2"  = "c",
+  "Manafactured_Year_and_Month"  = "c",
+  "Engine_Displacement_(Cubic_Centimeter)"  = "n",
+  "Imported_or_Domestic_Car"  = "c",
+  "Coding_of_Vehicle_Branding_&_Type"  = "c",
+  "qpt"  = "n",
+  "fpt"  = "c",
+  "Main_Insurance_Coverage_Group"  = "c",
+  "Insurance_Coverage"  = "c",
+  "Insured_Amount1"  = "n",
+  "Insured_Amount2"  = "n",
+  "Insured_Amount3"  = "n",
+  "Coverage_Deductible_if_applied"  = "c",
+  "Premium"  = "n",
+  "Replacement_cost_of_insured_vehicle"  = "n",
+  "Distribution_Channel"  = "n",
+  "Multiple_Products_with_TmNewa_(Yes_or_No?)" = "n",
+  "lia_class"  = "n",
+  "plia_acc"  = "n",
+  "pdmg_acc"  = "n",
+  "fassured"  = "c",
+  "ibirth"  = "c",
+  "fsex"  = "c",
+  "fmarriage"  = "c",
+  "aassured_zip"  = "c",
+  "iply_area"  = "c",
+  "dbirth"  = "c",
+  "fequipment1"  = "c",
+  "fequipment2"  = "c",
+  "fequipment3"  = "c",
+  "fequipment4"  = "c",
+  "fequipment5"  = "c",
+  "fequipment6"  = "c",
+  "fequipment9"  = "c",
+  "nequipment9"  = "c"
+  )
+```
+
+```{r}
+claim <- fread("data/claim_0702.csv")
+train <- fread('data/training-set.csv')
+train <- train %>% as_tibble()
+test <- fread('data/testing-set.csv')
+test <- test %>% as_tibble()
+```
+
+# Data Cleansing
+
+Claim 出險記錄應該以 Claim Number, Coverage 為單位。因此檢查有 Duplication 的分佈：
+
+```{r}
+claim %>% 
+  group_by(Claim_Number, Coverage) %>% 
+  tally %>% 
+  mutate(n_duplication = case_when(n >= 3 ~ "3 + ", T ~ n %>% as.character())) %>% 
+  ungroup %>% 
+  group_by(n_duplication) %>% 
+  summarise(n = n()) -> pie_data
+
+highchart() %>%
+  hc_title(text = "# of Duplication of (Claim Number + Coverage)xs") %>%
+  hc_colors(colors = c("#91C8AD", "#D48265", "#61A0A8", "#2F4554")) %>% 
+  hc_add_series_labels_values(pie_data$n_duplication, pie_data$n, type = "pie",  size = '100%', innerSize = "60%") %>%
+  hc_add_theme(hc_theme_gridlight()) %>%
+  hc_plotOptions(pie = list(colorByPoint = TRUE, size = 120, dataLabels = list(enabled = FALSE), showInLegend = TRUE)) %>% 
+  hc_exporting(enabled = TRUE)
+```
+
+以下會針對 1/ 非1 的進行清整。
+
+> 會分開是因為未來應該會有不同的清整方式。但目前其實是一樣的清整方式。
+
+```{r}
+claim %>% 
+  group_by(Claim_Number, Coverage) %>% 
+  mutate(n = n()) -> clean_data
+```
+
+## No Duplication on (Claim Number, Coverage)
+
+```{r}
+clean_data %>% 
+  filter(n == 1) %>% 
+  filter(Nature_of_the_claim == 1) %>% ## Cleansing 追償
+  group_by(Policy_Number) %>% 
+  summarise(n_claim_number = n_distinct(Claim_Number),
+            n_claim_coverage = n_distinct(Coverage, Claim_Number), 
+            At_Fault = max(`At_Fault?`), 
+            Paid_Amount = sum(Paid_Loss_Amount + paid_Expenses_Amount)) -> tmp
+```
+
+## Duplication on (Claim Number, Coverage)
+
+```{r}
+clean_data %>% 
+  filter(n > 1) %>% 
+  filter(Nature_of_the_claim == 1) %>% ## Cleansing 追償
+  group_by(Policy_Number) %>% 
+  summarise(n_claim_number = n_distinct(Claim_Number),
+            n_claim_coverage = n_distinct(Coverage, Claim_Number), 
+            At_Fault = max(`At_Fault?`), 
+            Paid_Amount = sum(Paid_Loss_Amount + paid_Expenses_Amount)) -> tmp2
+```
+
+## Export 
+
+```{r}
+ok <- tmp %>% bind_rows(tmp2)
+```
+

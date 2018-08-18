@@ -168,12 +168,14 @@ claim %>%
             ' # of rows At_Fault = 0 ?' = sum((At_Fault == 0), na.rm = T),
             ' # of rows At_Fault = 0 and (Paid_Loss_Amount) > 0 ?' = 
               sum((At_Fault == 0) & (Paid_Loss_Amount > 0), na.rm = T),
-            ' # of rows At_Fault < 100 ?' = sum(At_Fault < 100, na.rm = T),
-            ' # of rows At_Fault < 100 and (Paid_Loss_Amount or paid_Expenses_Amount) > 0 ?' = 
-              sum((At_Fault < 100) & (Paid_Loss_Amount+paid_Expenses_Amount > 0), na.rm = T),
-            ' # of rows At_Fault ≥ 100 ?' = sum(At_Fault >= 100, na.rm = T),
-            ' # of rows At_Fault ≥ 100 and (Paid_Loss_Amount or paid_Expenses_Amount) > 0 ?' = 
-              sum((At_Fault >= 100) & (Paid_Loss_Amount+paid_Expenses_Amount > 0), na.rm = T)) %>% 
+            ' # of rows At_Fault = 0 and (Paid_Loss_Amount+Deductible) > 0 ?' = 
+              sum((At_Fault == 0) & (Paid_Loss_Amount + Deductible > 0), na.rm = T),
+            ' # of rows At_Fault <= 100 ?' = sum(At_Fault <= 100, na.rm = T),
+            ' # of rows At_Fault <= 100 and (Paid_Loss_Amount or paid_Expenses_Amount) > 0 ?' = 
+              sum((At_Fault <= 100) & (Paid_Loss_Amount+paid_Expenses_Amount > 0), na.rm = T),
+            ' # of rows At_Fault > 100 ?' = sum(At_Fault > 100, na.rm = T),
+            ' # of rows At_Fault > 100 and (Paid_Loss_Amount or paid_Expenses_Amount) > 0 ?' = 
+              sum((At_Fault > 100) & (Paid_Loss_Amount+paid_Expenses_Amount > 0), na.rm = T)) %>% 
   gather('Q', 'value') %>% 
   mutate(Percentage_Overall = value/50646) %>% 
   datatable(extensions = 'Buttons', 
@@ -211,6 +213,8 @@ claim %>%
   inner_join(sample %>% select(Claim_Number, Coverage)) %>% 
   filter((Paid_Loss_Amount+paid_Expenses_Amount) == 0) %>% 
   head
+
+claim %>% filter(Claim_Number == '5480e4b9e966ddf67054cf6bcc0f7d6136881be5')
 ```
 
 檢查看看其中 `At_Fault` 的比例，發現各種狀況都有。不論肇責多少，都有沒有賠付的情形發生。是不是有可能警察判定肇責後，最終不一定需要保險公司出險賠付？
@@ -240,16 +244,14 @@ claim %>%
   group_by(Claim_Number, Coverage) %>% 
   mutate(Nature_of_the_claim_check = n_distinct(Nature_of_the_claim),
          rows = n()) %>% 
-  ungroup %>%
+  ungroup %>% 
   {
     count(.,  Nature_of_the_claim_check) %>% 
       spread(Nature_of_the_claim_check, n) %>% 
-      select('# of (claim number+Coverage) that Nature_of_the_claim only exist 1' = 1, 
-             '# of (claim number+Coverage) that Nature_of_the_claim exist (1,2)' = 2) -> tmp1
+      select('# of (claim number+Coverage) that Nature_of_the_claim only exist 1' = 1) -> tmp1
     
     summarise(.,
               ' # of (claim number+Coverage)' = n_distinct(Claim_Number,Coverage),
-              ' # of (claim number+Coverage) that have duplication' = n_distinct(Claim_Number,Coverage),
               ' # of rows Paid_Loss_Amount or paid_Expenses_Amount > 0 ?' =  
                 sum(ifelse((Paid_Loss_Amount+paid_Expenses_Amount) > 0, 1, 0)),
               ' # of rows Salvage_or_Subrogation > 0 ?' = sum(ifelse(Salvage_or_Subrogation > 0, 1, 0))) -> tmp2
@@ -257,7 +259,7 @@ claim %>%
     bind_cols(tmp1, tmp2)
   } %>% 
   gather('Q', 'value') %>% 
-  mutate(Percentage_Overall = value/12745)%>% 
+  mutate(Percentage_Overall = value/8622)%>% 
   datatable(extensions = 'Buttons', 
             options = list(dom = 'Bfrtip', scrollX = TRUE,
             buttons = c('copy', 'csv', 'excel')), 
